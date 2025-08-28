@@ -1,16 +1,36 @@
 from flask import Flask, jsonify
-from playwright.async_api import async_playwright
-import asyncio
-import time
-import random
+import subprocess
 import json
-import re
+import random
+import time
+import os
 
 app = Flask(__name__)
 
-async def run_playwright_task():
+def run_playwright_script():
+    """Run playwright automation using subprocess"""
+    
+    # Random messages to send
+    messages = [
+        "Make a simple calculator in Python",
+        "Generate a todo list app in React", 
+        "Write HTML for a login form",
+        "Give me CSS for a navbar",
+        "Create a REST API with Flask",
+        "Build a responsive navbar with CSS"
+    ]
+    
+    selected_message = random.choice(messages)
+    
+    # Create a temporary playwright script
+    script_content = f'''
+import asyncio
+from playwright.async_api import async_playwright
+import json
+import re
+
+async def main():
     async with async_playwright() as p:
-        # Launch browser with proper settings for cloud hosting
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -21,19 +41,18 @@ async def run_playwright_task():
                 '--no-first-run',
                 '--no-zygote',
                 '--single-process',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--disable-extensions'
             ]
         )
         
-        # Create context and page
         context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            viewport={{'width': 1920, 'height': 1080}},
+            user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
         )
         
         page = await context.new_page()
         
-        # Track network requests
         requests_data = []
         
         async def handle_request(request):
@@ -41,108 +60,110 @@ async def run_playwright_task():
                 post_data = request.post_data
                 headers = await request.all_headers()
                 
-                request_info = {
+                request_info = {{
                     "url": request.url,
                     "method": request.method,
-                    "headers": headers,
+                    "headers": dict(headers),
                     "data": post_data
-                }
+                }}
                 requests_data.append(request_info)
         
         page.on('request', handle_request)
         
         try:
-            # Navigate to the page
-            await page.goto("https://workik.com/ai-code-generator", wait_until="networkidle")
-            await page.wait_for_timeout(6000)  # Wait for page load
+            await page.goto("https://workik.com/ai-code-generator", wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(5000)
             
-            # === Step 1: Select model ===
+            # Try to select model
             try:
-                model_selector = page.locator("//span[contains(text(),'GPT 4.1 Mini')]")
-                if await model_selector.count() > 0:
-                    await model_selector.click()
+                model_btn = page.locator("//span[contains(text(),'GPT 4.1 Mini')]").first
+                if await model_btn.count() > 0:
+                    await model_btn.click()
                     await page.wait_for_timeout(2000)
-            except Exception as e:
-                print(f"Model selection error: {e}")
+            except:
+                pass
             
-            # === Step 2: Type random message ===
-            random_texts = [
-                "Make a simple calculator in Python",
-                "Generate a todo list app in React", 
-                "Write HTML for a login form",
-                "Give me CSS for a navbar",
-                "Create a REST API with Flask",
-                "Build a responsive navbar with CSS",
-                "Make a password generator in JavaScript"
-            ]
-            
-            message = random.choice(random_texts)
-            
-            # Find and fill the input box
-            input_box = page.locator("div[contenteditable='true']")
-            await input_box.wait_for(state="visible", timeout=10000)
-            
-            # Clear and type the message
-            await input_box.fill(message)
+            # Find input and type message
+            input_box = page.locator("div[contenteditable='true']").first
+            await input_box.wait_for(state="visible", timeout=15000)
+            await input_box.fill("{selected_message}")
             await page.wait_for_timeout(1000)
             
             # Click send button
-            send_button = page.locator("button.MuiButtonBase-root.css-11uhnn1")
-            if await send_button.count() == 0:
-                # Fallback selectors
-                send_button = page.locator("button[type='submit']")
-                if await send_button.count() == 0:
-                    send_button = page.locator("button:has-text('Send')")
+            send_btn = page.locator("button.MuiButtonBase-root").first
+            if await send_btn.count() == 0:
+                send_btn = page.locator("button[type='submit']").first
             
-            await send_button.click()
-            await page.wait_for_timeout(10000)  # Wait for response
+            await send_btn.click()
+            await page.wait_for_timeout(10000)
             
-            # Extract tokens from captured requests
-            tokens = {}
+            # Extract tokens
+            tokens = {{}}
             curl_command = None
             
-            for req_data in requests_data:
-                if req_data["data"]:
+            for req in requests_data:
+                if req["data"]:
                     try:
-                        body = json.loads(req_data["data"])
+                        body = json.loads(req["data"])
                         for key, val in body.items():
-                            if isinstance(val, str):
-                                # Check for JWT-like tokens or long strings
-                                if re.match(r"^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+$", val) or len(val) > 20:
-                                    tokens[key] = val
-                        
-                        curl_command = req_data
+                            if isinstance(val, str) and (len(val) > 20 or "." in val):
+                                tokens[key] = val
+                        curl_command = req
                         break
-                    except json.JSONDecodeError:
+                    except:
                         pass
             
-            await browser.close()
-            
-            return {
-                "message_sent": message,
+            result = {{
+                "message_sent": "{selected_message}",
                 "curl": curl_command,
                 "tokens": tokens,
                 "requests_captured": len(requests_data)
-            }
+            }}
+            
+            print(json.dumps(result))
             
         except Exception as e:
+            print(json.dumps({{"error": str(e)}}))
+        
+        finally:
             await browser.close()
-            return {"error": str(e)}
 
-def run_async_task():
-    """Wrapper to run async function in sync context"""
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+if __name__ == "__main__":
+    asyncio.run(main())
+'''
     
-    return loop.run_until_complete(run_playwright_task())
+    # Write script to temporary file
+    script_path = "/tmp/playwright_script.py"
+    with open(script_path, "w") as f:
+        f.write(script_content)
+    
+    try:
+        # Run the playwright script
+        result = subprocess.run(
+            ["python", script_path], 
+            capture_output=True, 
+            text=True, 
+            timeout=120
+        )
+        
+        if result.returncode == 0:
+            return json.loads(result.stdout.strip())
+        else:
+            return {"error": f"Script failed: {result.stderr}"}
+            
+    except subprocess.TimeoutExpired:
+        return {"error": "Script timed out after 120 seconds"}
+    except Exception as e:
+        return {"error": f"Execution error: {str(e)}"}
+    finally:
+        # Clean up
+        if os.path.exists(script_path):
+            os.remove(script_path)
 
 # === Flask Routes ===
 @app.route("/<task_id>", methods=["GET"])
 def process(task_id):
-    result = run_async_task()
+    result = run_playwright_script()
     return jsonify({
         "task_id": task_id,
         "result": result,
@@ -162,4 +183,5 @@ def home():
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
