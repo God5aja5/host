@@ -1,43 +1,12 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+# Add these imports at top of your app.py
+import requests
+import datetime
+import traceback
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-import time
-import random
-import json
-import re
-import os
 
-app = FastAPI()
-
-URL = "https://workik.com/ai-code-generator"
-
-def extract_tokens_from_text(text: str):
-    tokens = {}
-    if not text:
-        return tokens
-    # Try parse JSON
-    try:
-        body = json.loads(text)
-        if isinstance(body, dict):
-            for k, v in body.items():
-                if isinstance(v, str):
-                    if re.match(r"^[A-Za-z0-9-]+\.[A-Za-z0-9-]+\.[A-Za-z0-9-]+$", v) or len(v) > 20:
-                        tokens[k] = v
-        return tokens
-    except Exception:
-        pass
-
-    # Look for JWT-like or long alphanumeric sequences
-    matches = re.findall(r"[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+", text)
-    for i, m in enumerate(matches):
-        tokens[f"jwt_{i}"] = m
-    if not matches:
-        long_matches = re.findall(r"[A-Za-z0-9\-_]{30,}", text)
-        for i, m in enumerate(long_matches):
-            tokens[f"long_{i}"] = m
-    return tokens
-
+# Replace your existing run_playwright_task with this function
 def run_playwright_task():
+    URL = "https://workik.com/ai-code-generator"
     random_texts = [
         "Make a simple calculator in Python",
         "Generate a todo list app in React",
@@ -46,40 +15,134 @@ def run_playwright_task():
     ]
     message = random.choice(random_texts)
 
-    with sync_playwright() as pw:
-        # Launch Chromium (official image already contains browsers)
-        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
-        context = browser.new_context(viewport={"width": 1920, "height": 1080})
-        page = context.new_page()
-        try:
-            page.goto(URL, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(3)  # let SPA resources load a bit
+    # Quick HTTP reachability check from container (before launching browser)
+    try:
+        resp = requests.get(URL, timeout=8)
+        # Accept any 2xx/3xx/4xx but if DNS fails or connection error it will raise
+        reachable = True
+    except Exception as e:
+        return {
+            "message_sent": message,
+            "error": "Preflight HTTP check failed",
+            "preflight_exception": repr(e),
+            "hint": "Check outbound network/DNS from the host/container, or that the site doesn't block container IPs."
+        }
 
-            # Optional: click model selector if present
+    # Launch playwright and attempt navigation with retries and diagnostics
+    diagnostics = {}
+    with sync_playwright() as pw:
+        # Add common container-friendly flags
+        launch_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking"
+        ]
+        browser = None
+        try:
+            browser = pw.chromium.launch(headless=True, args=launch_args)
+        except Exception as e:
+            return {"error": "Browser launch failed", "exception": repr(e), "trace": traceback.format_exc()}
+
+        context = browser.new_context(viewport={"width": 1280, "height": 800},
+                                      user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36")
+        page = context.new_page()
+
+        # Quick connectivity sanity test: example.com
+        try:
+            page.goto("https://example.com", timeout=10000, wait_until="domcontentloaded")
+            diagnostics["example_ok"] = True
+        except Exception as e:
+            diagnostics["example_ok"] = False
+            diagnostics["example_exc"] = repr(e)
+
+        # Try navigating to target with retries
+        last_exc = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                nav_timeout = 30000 + (attempt - 1) * 30000  # 30s, 60s, 90s
+                page.goto(URL, timeout=nav_timeout, wait_until="domcontentloaded")
+                # small wait for SPA resources
+                page.wait_for_timeout(1500)
+                # success
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                diagnostics.setdefault("attempts", []).append({
+                    "attempt": attempt,
+                    "timeout_ms": nav_timeout,
+                    "exception": repr(exc)
+                })
+                # on failure, try to capture some debug artifacts
+                try:
+                    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                    screenshot_path = f"/tmp/fail_nav_{ts}_att{attempt}.png"
+                    page.screenshot(path=screenshot_path, full_page=False)
+                    diagnostics[f"screenshot_attempt_{attempt}"] = screenshot_path
+                except Exception as ss_e:
+                    diagnostics[f"screenshot_err_{attempt}"] = repr(ss_e)
+                # collect page content (trimmed)
+                try:
+                    content = page.content()[:8000]
+                    diagnostics[f"page_content_attempt_{attempt}"] = content
+                except Exception as c_e:
+                    diagnostics[f"page_content_err_{attempt}"] = repr(c_e)
+                # small backoff before next attempt
+                page.wait_for_timeout(1000 * attempt)
+
+        # If navigation never succeeded, return diagnostics
+        if last_exc is not None:
+            # Close resources
+            try:
+                context.close()
+            except:
+                pass
+            try:
+                browser.close()
+            except:
+                pass
+            return {
+                "message_sent": message,
+                "error": "Navigation failed after retries",
+                "last_exception": repr(last_exc),
+                "diagnostics": diagnostics,
+                "hint": "If example.com also failed, container likely has no outbound network or DNS. If example succeeded but target failed, site may block Render IPs or require extra headers."
+            }
+
+        # From here, page is loaded. Continue the rest of your logic:
+        try:
+            # click the GPT model if present
             try:
                 model_locator = page.locator("text=GPT 4.1 Mini").first
                 if model_locator.count() > 0:
                     model_locator.click(timeout=3000)
-                    time.sleep(1)
+                    page.wait_for_timeout(500)
             except Exception:
                 pass
 
-            # Fill the contenteditable input
+            # fill contenteditable
             try:
                 input_box = page.locator("div[contenteditable='true']").first
                 if input_box.count() == 0:
-                    return {"error": "input box not found"}
+                    raise RuntimeError("input box not found")
                 input_box.evaluate("(el, text) => { el.innerText = text; el.dispatchEvent(new InputEvent('input', { bubbles: true })); }", message)
-                time.sleep(0.3)
+                page.wait_for_timeout(300)
             except Exception as e:
-                return {"error": f"failed to fill input: {str(e)}"}
+                # close and return
+                context.close()
+                browser.close()
+                return {"message_sent": message, "error": "failed to fill input", "exception": repr(e)}
 
-            # Capture POST request containing "trigger?"
+            # capture request
             req_info = None
             try:
                 predicate = lambda req: ("trigger?" in req.url or "trigger?" in req.url.split("?")[0]) and req.method == "POST"
                 with page.expect_request(predicate, timeout=15000) as req_ctx:
-                    # Click send button; fallback to pressing Enter if not found
+                    # send
                     try:
                         send_btn = page.locator("button.MuiButtonBase-root.css-11uhnn1").first
                         if send_btn.count() > 0:
@@ -91,55 +154,34 @@ def run_playwright_task():
                             input_box.press("Enter")
                         except Exception:
                             pass
-
                     req = req_ctx.value
-                    # Extract data safely (some Request APIs are methods in different versions)
-                    try:
-                        post_data = req.post_data
-                    except Exception:
-                        try:
-                            post_data = req.post_data()
-                        except Exception:
-                            post_data = ""
-                    req_info = {
-                        "url": req.url,
-                        "method": req.method,
-                        "headers": dict(req.headers),
-                        "post_data": post_data or ""
-                    }
+                    post_data = getattr(req, "post_data", "") or ""
+                    req_info = {"url": req.url, "method": req.method, "headers": dict(req.headers), "post_data": post_data}
             except PlaywrightTimeoutError:
-                # timed out waiting for the request
                 req_info = None
             except Exception as e:
-                return {"error": f"error capturing request: {str(e)}"}
+                req_info = {"capture_error": repr(e)}
 
-            tokens = {}
-            if req_info and req_info.get("post_data"):
-                tokens = extract_tokens_from_text(req_info["post_data"])
-
-            return {
-                "message_sent": message,
-                "request": req_info,
-                "tokens": tokens
-            }
-        finally:
+            # final cleanup
             try:
                 context.close()
-            except Exception:
+            except:
                 pass
             try:
                 browser.close()
-            except Exception:
+            except:
                 pass
 
-@app.get("/{task_id}")
-def process(task_id: str):
-    try:
-        result = run_playwright_task()
-        return JSONResponse({"task_id": task_id, "result": result})
-    except Exception as e:
-        return JSONResponse({"task_id": task_id, "error": str(e)})
+            # return successful result
+            return {"message_sent": message, "request": req_info, "tokens": {}, "diagnostics": diagnostics}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
+        except Exception as e:
+            try:
+                context.close()
+            except:
+                pass
+            try:
+                browser.close()
+            except:
+                pass
+            return {"message_sent": message, "error": "unexpected failure", "exception": repr(e), "trace": traceback.format_exc(), "diagnostics": diagnostics}
