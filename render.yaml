@@ -2,9 +2,10 @@ services:
   - type: web
     name: playwright-automation
     env: python
+    runtime: python-3.10.12
     plan: free
-    buildCommand: "pip install -r requirements.txt && python -m playwright install --with-deps chromium"
-    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt && python -m playwright install --with-deps chromium"
+    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app --timeout 120"
     envVars:
       - key: PYTHONUNBUFFERED
         value: 1
