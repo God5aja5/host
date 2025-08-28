@@ -2,12 +2,14 @@ services:
   - type: web
     name: playwright-automation
     env: python
-    runtime: python-3.10.12
+    runtime: python-3.9.18
     plan: free
-    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt && python -m playwright install --with-deps chromium"
-    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app --timeout 120"
+    buildCommand: "pip install --upgrade pip setuptools wheel && pip install --only-binary=all -r requirements.txt && python -m playwright install --with-deps chromium"
+    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app --timeout 120 --workers 1"
     envVars:
       - key: PYTHONUNBUFFERED
         value: 1
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: 0
+      - key: PIP_ONLY_BINARY
+        value: ":all:"
