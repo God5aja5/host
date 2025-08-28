@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: playwright-automation
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt && python -m playwright install --with-deps chromium"
+    startCommand: "gunicorn --bind 0.0.0.0:$PORT app:app"
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: 1
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: 0
