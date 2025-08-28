@@ -3,13 +3,17 @@ import random
 import requests
 import datetime
 import traceback
+import asyncio
 from fastapi import FastAPI
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # Create FastAPI app
-app = FastAPI()
+app = FastAPI(title="Playwright FastAPI Tasks",
+              description="Endpoints to run Playwright tasks safely in async FastAPI",
+              version="1.0.0")
 
-# Your Playwright task
+
+# Your synchronous Playwright task
 def run_playwright_task():
     URL = "https://workik.com/ai-code-generator"
     random_texts = [
@@ -22,8 +26,7 @@ def run_playwright_task():
 
     # Quick HTTP reachability check
     try:
-        resp = requests.get(URL, timeout=8)
-        reachable = True
+        requests.get(URL, timeout=8)
     except Exception as e:
         return {
             "message_sent": message,
@@ -42,7 +45,6 @@ def run_playwright_task():
             "--disable-extensions",
             "--disable-background-networking"
         ]
-        browser = None
         try:
             browser = pw.chromium.launch(headless=True, args=launch_args)
         except Exception as e:
@@ -52,7 +54,6 @@ def run_playwright_task():
                                       user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36")
         page = context.new_page()
 
-        # Quick connectivity sanity test
         try:
             page.goto("https://example.com", timeout=10000, wait_until="domcontentloaded")
             diagnostics["example_ok"] = True
@@ -60,7 +61,6 @@ def run_playwright_task():
             diagnostics["example_ok"] = False
             diagnostics["example_exc"] = repr(e)
 
-        # Try navigating to target with retries
         last_exc = None
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -106,7 +106,6 @@ def run_playwright_task():
 
         # Continue normal task
         try:
-            # select GPT model if available
             try:
                 model_locator = page.locator("text=GPT 4.1 Mini").first
                 if model_locator.count() > 0:
@@ -114,7 +113,6 @@ def run_playwright_task():
                     page.wait_for_timeout(500)
             except Exception: pass
 
-            # fill input box
             try:
                 input_box = page.locator("div[contenteditable='true']").first
                 if input_box.count() == 0:
@@ -126,7 +124,6 @@ def run_playwright_task():
                 browser.close()
                 return {"message_sent": message, "error": "failed to fill input", "exception": repr(e)}
 
-            # capture request
             req_info = None
             try:
                 predicate = lambda req: ("trigger?" in req.url or "trigger?" in req.url.split("?")[0]) and req.method == "POST"
@@ -163,12 +160,23 @@ def run_playwright_task():
             return {"message_sent": message, "error": "unexpected failure", "exception": repr(e), "trace": traceback.format_exc(), "diagnostics": diagnostics}
 
 
-# FastAPI route
+# Root endpoint
 @app.get("/")
 async def root():
     return {"message": "FastAPI + Playwright Ready"}
 
+# Multiple async endpoints wrapping sync Playwright using asyncio.to_thread
 @app.get("/run-task")
 async def run_task():
-    result = run_playwright_task()
+    result = await asyncio.to_thread(run_playwright_task)
+    return result
+
+@app.get("/run-task2")
+async def run_task2():
+    result = await asyncio.to_thread(run_playwright_task)
+    return result
+
+@app.get("/run-task3")
+async def run_task3():
+    result = await asyncio.to_thread(run_playwright_task)
     return result
