@@ -11,9 +11,11 @@ app = FastAPI()
 
 URL = "https://workik.com/ai-code-generator"
 
-def extract_tokens_from_text(text):
+def extract_tokens_from_text(text: str):
     tokens = {}
-    # try parse as json first
+    if not text:
+        return tokens
+    # Try parse JSON
     try:
         body = json.loads(text)
         if isinstance(body, dict):
@@ -21,15 +23,18 @@ def extract_tokens_from_text(text):
                 if isinstance(v, str):
                     if re.match(r"^[A-Za-z0-9-]+\.[A-Za-z0-9-]+\.[A-Za-z0-9-]+$", v) or len(v) > 20:
                         tokens[k] = v
+        return tokens
     except Exception:
-        # fallback: regex find jwt-like or long alphanumeric sequences
-        matches = re.findall(r"[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+", text)
-        for i, m in enumerate(matches):
-            tokens[f"match_{i}"] = m
-        if not matches:
-            long_matches = re.findall(r"[A-Za-z0-9\-_]{30,}", text)
-            for i, m in enumerate(long_matches):
-                tokens[f"longmatch_{i}"] = m
+        pass
+
+    # Look for JWT-like or long alphanumeric sequences
+    matches = re.findall(r"[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+", text)
+    for i, m in enumerate(matches):
+        tokens[f"jwt_{i}"] = m
+    if not matches:
+        long_matches = re.findall(r"[A-Za-z0-9\-_]{30,}", text)
+        for i, m in enumerate(long_matches):
+            tokens[f"long_{i}"] = m
     return tokens
 
 def run_playwright_task():
@@ -42,83 +47,71 @@ def run_playwright_task():
     message = random.choice(random_texts)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ])
+        # Launch Chromium (official image already contains browsers)
+        browser = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         try:
             page.goto(URL, wait_until="domcontentloaded", timeout=30000)
-            # give extra time for full page load if needed
-            time.sleep(4)
+            time.sleep(3)  # let SPA resources load a bit
 
-            # Step 1: click model if present
+            # Optional: click model selector if present
             try:
-                # locate element by text and click (first match)
                 model_locator = page.locator("text=GPT 4.1 Mini").first
                 if model_locator.count() > 0:
-                    model_locator.click(timeout=5000)
+                    model_locator.click(timeout=3000)
                     time.sleep(1)
             except Exception:
-                # ignore if not found
                 pass
 
-            # Step 2: fill contenteditable with our message
+            # Fill the contenteditable input
             try:
                 input_box = page.locator("div[contenteditable='true']").first
+                if input_box.count() == 0:
+                    return {"error": "input box not found"}
                 input_box.evaluate("(el, text) => { el.innerText = text; el.dispatchEvent(new InputEvent('input', { bubbles: true })); }", message)
-                time.sleep(0.5)
+                time.sleep(0.3)
             except Exception as e:
-                return {"error": f"Could not find or fill input box: {str(e)}"}
+                return {"error": f"failed to fill input: {str(e)}"}
 
-            # prepare to capture the trigger request
+            # Capture POST request containing "trigger?"
             req_info = None
             try:
-                # Use expect_request as context manager to capture the POST request containing 'trigger?'
-                with page.expect_request(lambda req: ("trigger?" in req.url or "trigger?" in req.url.split("?")[0]) and req.method == "POST", timeout=15000) as ex_req:
-                    # Click send button
+                predicate = lambda req: ("trigger?" in req.url or "trigger?" in req.url.split("?")[0]) and req.method == "POST"
+                with page.expect_request(predicate, timeout=15000) as req_ctx:
+                    # Click send button; fallback to pressing Enter if not found
                     try:
                         send_btn = page.locator("button.MuiButtonBase-root.css-11uhnn1").first
-                        send_btn.click()
+                        if send_btn.count() > 0:
+                            send_btn.click()
+                        else:
+                            input_box.press("Enter")
                     except Exception:
-                        # fallback: press Enter in input_box
                         try:
                             input_box.press("Enter")
                         except Exception:
                             pass
-                    # wait for the expected request
-                    req = ex_req.value
+
+                    req = req_ctx.value
+                    # Extract data safely (some Request APIs are methods in different versions)
+                    try:
+                        post_data = req.post_data
+                    except Exception:
+                        try:
+                            post_data = req.post_data()
+                        except Exception:
+                            post_data = ""
                     req_info = {
                         "url": req.url,
                         "method": req.method,
                         "headers": dict(req.headers),
-                        "post_data": req.post_data or ""
+                        "post_data": post_data or ""
                     }
             except PlaywrightTimeoutError:
-                # timed out waiting for request
-                # Collect any recent requests that contain 'trigger?' as fallback
-                recent = []
-                for r in context.request._requests:  # private API fallback; best-effort
-                    try:
-                        if "trigger?" in r.url and r.method == "POST":
-                            recent.append(r)
-                    except Exception:
-                        pass
-                if recent:
-                    r = recent[-1]
-                    req_info = {
-                        "url": getattr(r, "url", ""),
-                        "method": getattr(r, "method", ""),
-                        "headers": dict(getattr(r, "headers", {})),
-                        "post_data": getattr(r, "post_data", "") or ""
-                    }
-                else:
-                    req_info = None
+                # timed out waiting for the request
+                req_info = None
             except Exception as e:
-                return {"error": f"Error while capturing request: {str(e)}"}
+                return {"error": f"error capturing request: {str(e)}"}
 
             tokens = {}
             if req_info and req_info.get("post_data"):
@@ -146,3 +139,7 @@ def process(task_id: str):
         return JSONResponse({"task_id": task_id, "result": result})
     except Exception as e:
         return JSONResponse({"task_id": task_id, "error": str(e)})
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), log_level="info")
